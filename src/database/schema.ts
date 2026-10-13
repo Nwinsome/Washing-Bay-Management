@@ -11,7 +11,9 @@ export function initializeDatabase(path = databasePath) {
   database.pragma('foreign_keys = ON');
   database.pragma('journal_mode = WAL');
 
-  database.exec(readFileSync(join(__dirname, 'schema.sql'), 'utf8'));
+  database.transaction(() => {
+    for (const file of ['schema.sql', 'catalog.sql']) database.exec(readFileSync(join(__dirname, file), 'utf8'));
+  })();
 
   return database;
 }

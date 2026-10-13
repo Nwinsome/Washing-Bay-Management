@@ -1,0 +1,15 @@
+.earnings-page { display: grid; gap: 24px; }
+.earnings-page .worker-form-grid { align-items: end; padding: 0 23px 23px; gap: 16px 20px; }
+.earnings-page .worker-form-grid .primary-button { min-height: 44px; }
+.earnings-page .worker-toolbar { align-items: end; flex-wrap: wrap; }
+.earnings-page .metric-card strong { font-size: clamp(1.15rem, 2vw, 1.7rem); }
+.earnings-page h3 { margin-top: 28px; color: #154f50; }
+.earnings-page table small { max-width: 360px; white-space: normal; }
+.earnings-page .dashboard-panel > h3,
+.earnings-page .dashboard-panel > .overview-note,
+.earnings-page .dashboard-panel > .worker-notice,
+.earnings-page .dashboard-panel > .worker-metrics { margin-left: 23px; margin-right: 23px; }
+.earnings-page button:disabled { opacity: .6; cursor: default; }
+.earnings-page .workers-intro { margin-bottom: 0; }
+@media (max-width: 850px) { .earnings-page .worker-toolbar .field { flex: 1 1 180px; } }
+@media (max-width: 700px) { .dashboard-sidebar nav { flex-wrap: wrap; } .earnings-page .worker-form-grid { padding: 0 18px 18px; } }

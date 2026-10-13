@@ -6,6 +6,8 @@
   "scripts": {
   "dev": "node scripts/dev.cjs",
   "dev:renderer": "vite",
+  "typecheck": "tsc --noEmit --incremental false",
+  "test": "node --test tests/*.test.cjs",
   "build": "tsc && vite build",
   "electron": "electron .",
   "start": "electron ."
