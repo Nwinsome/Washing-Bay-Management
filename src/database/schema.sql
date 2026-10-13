@@ -583,3 +583,200 @@
         WHERE p.worker_id=(SELECT worker_id FROM worker_payments WHERE id=NEW.worker_payment_id) AND p.id!=NEW.worker_payment_id AND r.worker_payment_id IS NULL)
         THEN RAISE(ABORT,'Historical worker payments require reconciliation.') END;
     END;
+
+-- Phase 8: append-only expense events and closing revisions; legacy tables retained.
+CREATE TABLE IF NOT EXISTS expense_events (
+ id INTEGER PRIMARY KEY, category TEXT NOT NULL, description TEXT NOT NULL,
+ amount_pesewas INTEGER NOT NULL CHECK(typeof(amount_pesewas)='integer' AND amount_pesewas!=0 AND abs(amount_pesewas)<=9007199254740991),
+ method TEXT NOT NULL CHECK(method IN ('cash','card','mobile_money','bank_transfer','other')),
+ business_date TEXT NOT NULL, reference TEXT, reverses_id INTEGER UNIQUE REFERENCES expense_events(id) ON DELETE RESTRICT,
+ reason TEXT, recorded_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT, recorded_at TEXT NOT NULL,
+ request_key TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
+ CHECK((reverses_id IS NULL AND amount_pesewas>0) OR (reverses_id IS NOT NULL AND amount_pesewas<0))
+);
+CREATE TABLE IF NOT EXISTS financial_closings (
+ id INTEGER PRIMARY KEY, business_date TEXT NOT NULL, snapshot TEXT NOT NULL,
+ opening_pesewas INTEGER NOT NULL, opening_reason TEXT NOT NULL,
+ carry_from INTEGER REFERENCES financial_closings(id), actual_pesewas INTEGER NOT NULL CHECK(actual_pesewas>=0),
+ variance_pesewas INTEGER NOT NULL, explanation TEXT NOT NULL,
+ closed_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT, closed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS closing_reopenings (
+ closing_id INTEGER PRIMARY KEY REFERENCES financial_closings(id) ON DELETE RESTRICT,
+ reason TEXT NOT NULL, reopened_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT, reopened_at TEXT NOT NULL
+);
+CREATE VIEW IF NOT EXISTS confirmed_financial_closings AS SELECT c.* FROM financial_closings c
+ WHERE NOT EXISTS(SELECT 1 FROM closing_reopenings r WHERE r.closing_id=c.id);
+CREATE TRIGGER IF NOT EXISTS prevent_duplicate_financial_closing BEFORE INSERT ON financial_closings
+ WHEN EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date=NEW.business_date)
+ BEGIN SELECT RAISE(ABORT,'This business day is already closed.'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_expense_event BEFORE UPDATE ON expense_events BEGIN SELECT RAISE(ABORT,'Expense history is immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_expense_event BEFORE DELETE ON expense_events BEGIN SELECT RAISE(ABORT,'Expense history must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_financial_closing BEFORE UPDATE ON financial_closings BEGIN SELECT RAISE(ABORT,'Closing snapshots are immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_financial_closing BEFORE DELETE ON financial_closings BEGIN SELECT RAISE(ABORT,'Closing history must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_reopening BEFORE UPDATE ON closing_reopenings BEGIN SELECT RAISE(ABORT,'Reopening history is immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_reopening BEFORE DELETE ON closing_reopenings BEGIN SELECT RAISE(ABORT,'Reopening history must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS validate_expense_reversal BEFORE INSERT ON expense_events WHEN NEW.reverses_id IS NOT NULL BEGIN
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM expense_events e WHERE e.id=NEW.reverses_id AND e.reverses_id IS NULL
+ AND NEW.amount_pesewas=-e.amount_pesewas AND NEW.method=e.method AND NEW.category=e.category)
+ THEN RAISE(ABORT,'Invalid expense reversal.') END;
+END;
+CREATE TRIGGER IF NOT EXISTS closed_expense_date BEFORE INSERT ON expense_events
+ WHEN EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=NEW.business_date)
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before backdating an expense.'); END;
+CREATE TRIGGER IF NOT EXISTS closed_payment_date BEFORE INSERT ON payments
+ WHEN EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(NEW.paid_at,1,10))
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before backdating a payment.'); END;
+CREATE TRIGGER IF NOT EXISTS closed_payout_date BEFORE INSERT ON worker_payments
+ WHEN EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(NEW.payment_date,1,10))
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before backdating a payout.'); END;
+CREATE TRIGGER IF NOT EXISTS preserve_closed_payment BEFORE UPDATE ON payments
+ WHEN EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(OLD.paid_at,1,10) OR business_date>=substr(NEW.paid_at,1,10))
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before changing a payment.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_closed_payment BEFORE DELETE ON payments
+ WHEN EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(OLD.paid_at,1,10))
+ BEGIN SELECT RAISE(ABORT,'Closed payment sources must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS closed_visit_creation BEFORE INSERT ON transactions
+ WHEN EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(NEW.created_at,1,10))
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before recording a visit.'); END;
+CREATE TRIGGER IF NOT EXISTS closed_visit_completion BEFORE UPDATE OF completed_at,cancelled_at ON visit_details
+ WHEN (NEW.completed_at IS NOT OLD.completed_at AND EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(NEW.completed_at,1,10) OR business_date>=substr(OLD.completed_at,1,10)))
+ OR (NEW.cancelled_at IS NOT OLD.cancelled_at AND EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(NEW.cancelled_at,1,10) OR business_date>=substr(OLD.cancelled_at,1,10)))
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before changing service completion or cancellation.'); END;
+CREATE TRIGGER IF NOT EXISTS closed_visit_details BEFORE INSERT ON visit_details
+ WHEN EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(NEW.completed_at,1,10) OR business_date>=substr(NEW.cancelled_at,1,10))
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before backdating service completion.'); END;
+CREATE TRIGGER IF NOT EXISTS preserve_closed_visit_total BEFORE UPDATE OF total ON transactions
+ WHEN NEW.total!=OLD.total AND EXISTS(SELECT 1 FROM confirmed_financial_closings WHERE business_date>=substr(OLD.created_at,1,10))
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before changing service charges.'); END;
+CREATE TRIGGER IF NOT EXISTS preserve_closed_visit_precise_total BEFORE UPDATE OF total_pesewas ON visit_details
+ WHEN NEW.total_pesewas!=OLD.total_pesewas AND EXISTS(SELECT 1 FROM transactions t JOIN confirmed_financial_closings c ON c.business_date>=substr(t.created_at,1,10) WHERE t.id=OLD.transaction_id)
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before changing service charges.'); END;
+CREATE INDEX IF NOT EXISTS idx_expense_event_date ON expense_events(business_date);
+CREATE INDEX IF NOT EXISTS idx_financial_closing_date ON financial_closings(business_date);
+
+-- Phase 9: company metadata and payment grouping; payments remain the receipt ledger.
+CREATE TABLE IF NOT EXISTS company_account_settings (
+ company_id INTEGER PRIMARY KEY REFERENCES companies(id) ON DELETE RESTRICT,
+ is_active INTEGER NOT NULL CHECK(is_active IN (0,1)), credit_enabled INTEGER NOT NULL CHECK(credit_enabled IN (0,1)),
+ credit_limit_pesewas INTEGER CHECK(credit_limit_pesewas IS NULL OR (typeof(credit_limit_pesewas)='integer' AND credit_limit_pesewas>=0 AND credit_limit_pesewas<=9007199254740991)),
+ terms_days INTEGER CHECK(terms_days IS NULL OR (typeof(terms_days)='integer' AND terms_days BETWEEN 0 AND 3650)), updated_at TEXT NOT NULL
+);
+CREATE VIEW IF NOT EXISTS company_accounts AS SELECT c.*,coalesce(s.is_active,1) AS is_active,
+ coalesce(s.credit_enabled,0) AS credit_enabled,s.credit_limit_pesewas,s.terms_days,s.updated_at
+ FROM companies c LEFT JOIN company_account_settings s ON s.company_id=c.id;
+CREATE TABLE IF NOT EXISTS company_vehicle_events (
+ id INTEGER PRIMARY KEY, vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE RESTRICT,
+ company_id INTEGER REFERENCES companies(id) ON DELETE RESTRICT,reason TEXT NOT NULL,
+ changed_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,changed_at TEXT NOT NULL
+);
+CREATE VIEW IF NOT EXISTS company_vehicle_current AS SELECT e.* FROM company_vehicle_events e
+ WHERE e.id=(SELECT max(id) FROM company_vehicle_events WHERE vehicle_id=e.vehicle_id);
+CREATE TABLE IF NOT EXISTS visit_company_snapshots (
+ transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id) ON DELETE RESTRICT,
+ company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,company_name TEXT NOT NULL,
+ due_date TEXT,terms_days INTEGER,credit_enabled INTEGER NOT NULL,credit_limit_pesewas INTEGER,
+ reason TEXT NOT NULL,associated_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,associated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS company_payment_batches (
+ id INTEGER PRIMARY KEY,company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+ amount_pesewas INTEGER NOT NULL CHECK(typeof(amount_pesewas)='integer' AND amount_pesewas>0 AND amount_pesewas<=9007199254740991),
+ method TEXT NOT NULL CHECK(method IN ('cash','mobile_money','bank_transfer','card','other')),payment_date TEXT NOT NULL,
+ reference TEXT,allocation_reason TEXT NOT NULL,request_key TEXT NOT NULL UNIQUE,payload TEXT NOT NULL,
+ received_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,recorded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS company_payment_allocations (
+ payment_id INTEGER PRIMARY KEY REFERENCES payments(id) ON DELETE RESTRICT,
+ batch_id INTEGER NOT NULL REFERENCES company_payment_batches(id) ON DELETE RESTRICT,
+ transaction_id INTEGER NOT NULL REFERENCES visit_company_snapshots(transaction_id) ON DELETE RESTRICT,
+ UNIQUE(batch_id,transaction_id)
+);
+CREATE INDEX IF NOT EXISTS idx_company_visits ON visit_company_snapshots(company_id);
+CREATE INDEX IF NOT EXISTS idx_company_batches ON company_payment_batches(company_id,payment_date);
+CREATE TRIGGER IF NOT EXISTS unique_company_name_insert BEFORE INSERT ON companies
+ WHEN EXISTS(SELECT 1 FROM companies WHERE lower(trim(name))=lower(trim(NEW.name)))
+ BEGIN SELECT RAISE(ABORT,'A company with this name already exists.'); END;
+CREATE TRIGGER IF NOT EXISTS unique_company_name_update BEFORE UPDATE OF name ON companies
+ WHEN NEW.name!=OLD.name AND EXISTS(SELECT 1 FROM companies WHERE id!=OLD.id AND lower(trim(name))=lower(trim(NEW.name)))
+ BEGIN SELECT RAISE(ABORT,'A company with this name already exists.'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_company_visit BEFORE UPDATE ON visit_company_snapshots BEGIN SELECT RAISE(ABORT,'Visit company snapshots are immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_company_visit BEFORE DELETE ON visit_company_snapshots BEGIN SELECT RAISE(ABORT,'Visit company history must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS closed_company_association BEFORE INSERT ON visit_company_snapshots
+ WHEN EXISTS(SELECT 1 FROM transactions t JOIN confirmed_financial_closings c ON c.business_date>=substr(t.created_at,1,10) WHERE t.id=NEW.transaction_id)
+ BEGIN SELECT RAISE(ABORT,'Reopen affected closing days before associating historical company charges.'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_company_vehicle BEFORE UPDATE ON company_vehicle_events BEGIN SELECT RAISE(ABORT,'Company vehicle history is immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_company_vehicle BEFORE DELETE ON company_vehicle_events BEGIN SELECT RAISE(ABORT,'Company vehicle history must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_company_batch BEFORE UPDATE ON company_payment_batches BEGIN SELECT RAISE(ABORT,'Company receipts are immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_company_batch BEFORE DELETE ON company_payment_batches BEGIN SELECT RAISE(ABORT,'Company receipts must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_company_allocation BEFORE UPDATE ON company_payment_allocations BEGIN SELECT RAISE(ABORT,'Company allocations are immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_company_allocation BEFORE DELETE ON company_payment_allocations BEGIN SELECT RAISE(ABORT,'Company allocations must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS validate_company_allocation BEFORE INSERT ON company_payment_allocations BEGIN
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM payments p JOIN payment_receipts r ON r.payment_id=p.id JOIN visit_company_snapshots v ON v.transaction_id=p.transaction_id
+ JOIN company_payment_batches b ON b.id=NEW.batch_id WHERE p.id=NEW.payment_id AND p.transaction_id=NEW.transaction_id AND v.company_id=b.company_id
+ AND p.status='completed' AND p.method=b.method AND substr(p.paid_at,1,10)=b.payment_date)
+ THEN RAISE(ABORT,'Company allocation must match a verified receipt and company visit.') END;
+ SELECT CASE WHEN (SELECT coalesce(sum(r.amount_pesewas),0) FROM company_payment_allocations a JOIN payment_receipts r ON r.payment_id=a.payment_id WHERE a.batch_id=NEW.batch_id)
+ +(SELECT amount_pesewas FROM payment_receipts WHERE payment_id=NEW.payment_id)>(SELECT amount_pesewas FROM company_payment_batches WHERE id=NEW.batch_id)
+ THEN RAISE(ABORT,'Company allocations exceed the receipt amount.') END;
+END;
+CREATE TRIGGER IF NOT EXISTS immutable_allocated_payment BEFORE UPDATE ON payments
+ WHEN EXISTS(SELECT 1 FROM company_payment_allocations WHERE payment_id=OLD.id)
+ BEGIN SELECT RAISE(ABORT,'Allocated company payments are immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_allocated_receipt BEFORE UPDATE ON payment_receipts
+ WHEN EXISTS(SELECT 1 FROM company_payment_allocations WHERE payment_id=OLD.payment_id)
+ BEGIN SELECT RAISE(ABORT,'Allocated company receipts are immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS preserve_company_charge BEFORE UPDATE OF total,status ON transactions
+ WHEN EXISTS(SELECT 1 FROM visit_company_snapshots WHERE transaction_id=OLD.id)
+ AND (NEW.total!=OLD.total OR (NEW.status='cancelled' AND EXISTS(SELECT 1 FROM payments WHERE transaction_id=OLD.id AND status='completed')))
+ BEGIN SELECT RAISE(ABORT,'Company charges are immutable; paid visits require a refund workflow before cancellation.'); END;
+CREATE TRIGGER IF NOT EXISTS preserve_company_precise_charge BEFORE UPDATE OF total_pesewas ON visit_details
+ WHEN NEW.total_pesewas!=OLD.total_pesewas AND EXISTS(SELECT 1 FROM visit_company_snapshots WHERE transaction_id=OLD.transaction_id)
+ BEGIN SELECT RAISE(ABORT,'Company charges are immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS preserve_company_service_charge BEFORE UPDATE OF quantity,unit_price,line_total ON transaction_services
+ WHEN EXISTS(SELECT 1 FROM visit_company_snapshots WHERE transaction_id=OLD.transaction_id)
+ BEGIN SELECT RAISE(ABORT,'Company service charges are immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_company_service BEFORE DELETE ON transaction_services
+ WHEN EXISTS(SELECT 1 FROM visit_company_snapshots WHERE transaction_id=OLD.transaction_id)
+ BEGIN SELECT RAISE(ABORT,'Company service history must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS preserve_company_payment BEFORE UPDATE ON payments
+ WHEN EXISTS(SELECT 1 FROM visit_company_snapshots WHERE transaction_id=OLD.transaction_id OR transaction_id=NEW.transaction_id)
+ BEGIN SELECT RAISE(ABORT,'Company visit payment history is immutable.'); END;
+CREATE TRIGGER IF NOT EXISTS retain_company_payment BEFORE DELETE ON payments
+ WHEN EXISTS(SELECT 1 FROM visit_company_snapshots WHERE transaction_id=OLD.transaction_id)
+ BEGIN SELECT RAISE(ABORT,'Company visit payment history must be preserved.'); END;
+CREATE TRIGGER IF NOT EXISTS validate_company_credit BEFORE INSERT ON visit_company_snapshots BEGIN
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM company_accounts WHERE id=NEW.company_id AND is_active=1)
+ THEN RAISE(ABORT,'Company account is inactive.') END;
+ SELECT CASE WHEN (SELECT outstanding_pesewas FROM visit_balances WHERE id=NEW.transaction_id)>0
+ AND NOT EXISTS(SELECT 1 FROM company_accounts WHERE id=NEW.company_id AND credit_enabled=1)
+ THEN RAISE(ABORT,'Company credit is not authorized.') END;
+ SELECT CASE WHEN (SELECT credit_limit_pesewas FROM company_accounts WHERE id=NEW.company_id) IS NOT NULL
+ AND (SELECT coalesce(sum(b.outstanding_pesewas),0) FROM visit_company_snapshots s JOIN visit_balances b ON b.id=s.transaction_id WHERE s.company_id=NEW.company_id)
+ +(SELECT outstanding_pesewas FROM visit_balances WHERE id=NEW.transaction_id)>(SELECT credit_limit_pesewas FROM company_accounts WHERE id=NEW.company_id)
+ THEN RAISE(ABORT,'Company credit limit exceeded.') END;
+END;
+
+-- Phase 10: reporting indexes only; no financial history is rewritten.
+CREATE INDEX IF NOT EXISTS idx_report_payment_date ON payments(status,substr(paid_at,1,10),transaction_id);
+CREATE INDEX IF NOT EXISTS idx_report_visit_created ON transactions(substr(created_at,1,10));
+CREATE INDEX IF NOT EXISTS idx_report_visit_completed ON visit_details(substr(completed_at,1,10));
+CREATE INDEX IF NOT EXISTS idx_report_payout_date ON worker_payments(substr(payment_date,1,10),worker_id);
+CREATE INDEX IF NOT EXISTS idx_report_earning_date ON worker_service_earnings(substr(completed_at,1,10),worker_id,state);
+CREATE INDEX IF NOT EXISTS idx_report_legacy_expense_date ON expenses(substr(expense_date,1,10));
+
+-- Phase 11: application metadata, presentation preferences and portable logos.
+CREATE TABLE IF NOT EXISTS application_metadata (
+ id INTEGER PRIMARY KEY CHECK(id=1),product_id TEXT NOT NULL,schema_version INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO application_metadata VALUES(1,'wash-bay-manager',11);
+UPDATE application_metadata SET schema_version=11 WHERE product_id='wash-bay-manager' AND schema_version<11;
+CREATE TABLE IF NOT EXISTS business_preferences (
+ business_id INTEGER PRIMARY KEY REFERENCES business_settings(id) ON DELETE CASCADE,
+ date_format TEXT NOT NULL CHECK(date_format IN ('long','iso','day_first')),
+ start_page TEXT NOT NULL CHECK(start_page IN ('overview','visits','reports'))
+);
+CREATE TABLE IF NOT EXISTS business_logo_assets (
+ business_id INTEGER PRIMARY KEY REFERENCES business_settings(id) ON DELETE CASCADE,
+ mime_type TEXT NOT NULL CHECK(mime_type IN ('image/png','image/jpeg','image/webp')),
+ bytes BLOB NOT NULL CHECK(typeof(bytes)='blob' AND length(bytes)>0 AND length(bytes)<=5242880)
+);

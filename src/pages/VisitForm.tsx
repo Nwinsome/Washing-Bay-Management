@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Search } from 'lucide-react';
-import type { ServiceCatalog, Vehicle, VehicleDetails, Visit, VisitQuote, VisitSelection } from '../app-api';
+import type { Company, ServiceCatalog, Vehicle, VehicleDetails, Visit, VisitQuote, VisitSelection } from '../app-api';
 import CategorySelect from './CategorySelect';
 
 export const ghs = (pesewas: number) => new Intl.NumberFormat('en-GH', { style: 'currency', currency: 'GHS', currencyDisplay: 'code' }).format(pesewas / 100);
 export default function VisitForm({ catalog, onSaved, onClose, onActivity, onError }: {
   catalog: ServiceCatalog; onSaved: (visit: Visit) => void; onClose: () => void; onActivity: () => void; onError: (reason: unknown) => string;
 }) {
+  const [companyOptions,setCompanyOptions]=useState<Company[]>([]);
+  const [companyId,setCompanyId]=useState('vehicle');
+  const [dueDate,setDueDate]=useState('');
+  useEffect(()=>{let active=true;window.appApi.getCompanyOptions().then(r=>{if(active)setCompanyOptions(r.companies);}).catch(e=>{if(active)setError(onError(e));});return()=>{active=false;};},[onError]);
   const [mode, setMode] = useState<'vehicle' | 'non_vehicle'>('vehicle');
   const [register, setRegister] = useState(false);
   const [plate, setPlate] = useState('');
@@ -32,11 +36,11 @@ export default function VisitForm({ catalog, onSaved, onClose, onActivity, onErr
   const independent = catalog.services.filter(service => service.isActive && service.role!=='main' && (mode==='vehicle' || service.role==='independent'));
   const selection = useMemo<VisitSelection>(() => {
     const serviceIds = [...(mode === 'vehicle' && primary ? [Number(primary)] : []), ...additional];
-    return { mode, vehicleId: mode === 'vehicle' && !register ? vehicle?.id ?? null : null,
+    return { mode, companyId: companyId==='vehicle'?undefined:companyId===''?null:Number(companyId), dueDate:dueDate||undefined, vehicleId: mode === 'vehicle' && !register ? vehicle?.id ?? null : null,
       newVehicle: mode === 'vehicle' && register ? newVehicle : null,
       vehicleTypeId: mode === 'vehicle' ? register ? newVehicle.vehicleTypeId : vehicle?.vehicleTypeId ?? null : null,
       serviceIds, assignments: serviceIds.filter(id => workers[id]).map(serviceId => ({ serviceId, workerId: Number(workers[serviceId]) })) };
-  }, [mode,register,vehicle,newVehicle,primary,additional,workers]);
+  }, [mode,register,vehicle,newVehicle,primary,additional,workers,companyId,dueDate]);
   useEffect(() => {
     let active = true; setMatches([]); setLookupError('');
     if (mode !== 'vehicle' || register || !plate.trim() || vehicle) return;
@@ -58,7 +62,7 @@ export default function VisitForm({ catalog, onSaved, onClose, onActivity, onErr
   async function save() {
     if ((!quote && !retryInput) || busy) return;
     setBusy(true); setError('');
-    const payload = retryInput ?? { ...selection, arrivalAt: `${arrival}:00.000Z`, expectedTotalPesewas: quote!.totalPesewas, expectedLines: quote!.lines, requestKey };
+    const payload = retryInput ?? { ...selection, arrivalAt: `${arrival}:00.000Z`, expectedCompanyId: quote!.company?.id ?? null, expectedTotalPesewas: quote!.totalPesewas, expectedLines: quote!.lines, requestKey };
     setRetryInput(payload);
     try { const result = await window.appApi.createVisit(payload); if (alive.current) { onActivity(); onSaved(result); } }
     catch (reason) { if (alive.current) setError(onError(reason)); }
@@ -89,8 +93,9 @@ export default function VisitForm({ catalog, onSaved, onClose, onActivity, onErr
       </>}
       <fieldset className="visit-choice"><legend>{mode === 'vehicle' ? 'Optional extras and independent services' : 'Select the independent service'}</legend>{independent.map(service => <label key={service.id}><input type="checkbox" disabled={!availablePrice(service).available && !additional.includes(service.id)} checked={additional.includes(service.id)} onChange={event => setAdditional(event.target.checked ? [...additional,service.id] : additional.filter(id => id !== service.id))} />{service.name}{service.role==='vehicle_extra' ? ' (vehicle extra)' : ' (independent)'} · {availablePrice(service).label}</label>)}</fieldset>
       <div className="worker-form-grid">{selection.serviceIds.map(id => <div className="field" key={id}><label htmlFor={`visit-worker-${id}`}>Worker for {catalog.services.find(service => service.id === id)?.name}{catalog.services.find(service => service.id === id)?.kind === 'carpet_cleaning' ? ' (where applicable)' : ' *'}</label><select id={`visit-worker-${id}`} required={catalog.services.find(service => service.id === id)?.kind !== 'carpet_cleaning'} value={workers[id] ?? ''} onChange={event => setWorkers(current => ({ ...current,[id]: event.target.value }))}><option value="">Select active worker</option>{catalog.workers.map(worker => <option key={worker.id} value={worker.id}>{worker.name}</option>)}</select></div>)}</div>
+      <div className="worker-form-grid"><div className="field"><label htmlFor="visit-company">Company account</label><select id="visit-company" value={companyId} onChange={e=>setCompanyId(e.target.value)}><option value="vehicle">Use vehicle's company assignment, if present</option><option value="">Individual customer / no company</option>{companyOptions.map(c=><option key={c.id} value={c.id} disabled={!c.is_active}>{c.name} | {c.credit_enabled?'Credit approved':'Credit disabled'}{!c.is_active?' | Inactive':''}</option>)}</select><p className="field-hint">Company visits require approved credit because saving a visit records no payment.</p></div><div className="field"><label htmlFor="visit-company-due">Company due date (optional)</label><input id="visit-company-due" type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)} /><p className="field-hint">Leave blank to use configured terms, if present.</p></div></div>
       <div className="field"><label htmlFor="visit-arrival">Arrival time (Ghana time) *</label><input id="visit-arrival" required type="datetime-local" value={arrival} onChange={event => setArrival(event.target.value)} /></div>
-      <div className="visit-price" aria-live="polite">{pricing ? <span>Checking configured prices…</span> : quote ? <><ul>{quote.lines.map(line => <li key={line.serviceId}>{line.serviceName}<strong>{ghs(Math.round(line.unitPrice*100))}</strong></li>)}</ul><div><span>Total charge</span><strong>{ghs(quote.totalPesewas)}</strong></div><p>No payment will be recorded when saving this visit.</p></> : <p>Select the vehicle and services to see the configured price.</p>}</div>
+      <div className="visit-price" aria-live="polite">{pricing ? <span>Checking configured prices…</span> : quote ? <><ul>{quote.lines.map(line => <li key={line.serviceId}>{line.serviceName}<strong>{ghs(Math.round(line.unitPrice*100))}</strong></li>)}</ul><div><span>Total charge</span><strong>{ghs(quote.totalPesewas)}</strong></div><p>No payment will be recorded when saving this visit.</p>{quote.company && <p>Company charge: {quote.company.name}. Credit eligibility and limit are checked again when saving.</p>}</> : <p>Select the vehicle and services to see the configured price.</p>}</div>
       <div className="worker-form-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!quote || pricing || missingWorker || (mode === 'vehicle' && !primary)}>{busy ? 'Saving…' : 'Save waiting visit'}</button></div>
     </fieldset></form>
   </section>;

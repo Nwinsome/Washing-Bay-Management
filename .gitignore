@@ -21,3 +21,8 @@ logs/
 .aws/
 secrets/
 user-data/
+.desktop-app/
+.cache/
+desktop-test-results/
+playwright-report/
+*.wbbak/

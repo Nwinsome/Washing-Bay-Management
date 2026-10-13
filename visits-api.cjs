@@ -1,6 +1,6 @@
 const { randomUUID, createHash } = require('node:crypto');
 
-function registerVisitHandlers({ ipcMain, getDatabase, administrator, now, pricing, vehicles, earnings }) {
+function registerVisitHandlers({ ipcMain, getDatabase, administrator, now, pricing, vehicles, earnings, companies }) {
   function handle(channel, action) {
     ipcMain.handle(channel, (event, input) => {
       const user = administrator(event);
@@ -45,6 +45,7 @@ function registerVisitHandlers({ ipcMain, getDatabase, administrator, now, prici
   }
   function read(db, visitId) {
     return db.transaction(() => ({ ...base(db,visitId),
+      company: db.prepare('SELECT company_id AS id,company_name AS name,due_date AS dueDate FROM visit_company_snapshots WHERE transaction_id=?').get(visitId) ?? null,
       lines: pricing.readTransaction(db,{ id: visitId }).lines,
       payments: db.prepare(`SELECT p.id,p.method,p.reference,p.status,p.paid_at AS paidAt,
         coalesce(r.amount_pesewas,cast(round(p.amount*100) AS INTEGER)) AS amountPesewas
@@ -75,7 +76,9 @@ function registerVisitHandlers({ ipcMain, getDatabase, administrator, now, prici
     if (input.mode === 'non_vehicle' && primary.length) throw new Error('Washing and blowing visits require a registered vehicle.');
     if (input.mode==='non_vehicle' && priced.lines.some(line=>line.serviceRole==='vehicle_extra')) throw new Error('Engine Wash and Under Wash require a vehicle visit with a main service.');
     if (requireWorkers) for (const line of priced.lines) if (line.serviceKind !== 'carpet_cleaning' && !line.workerAssignment) throw new Error(`Assign an active worker for ${line.serviceName}.`);
-    return { ...priced, vehicleId, vehicleTypeId, totalPesewas: cents(Math.round(priced.total*100)) };
+    const totalPesewas = cents(Math.round(priced.total*100));
+    const company = companies.validateProspective(db,input,vehicleId,totalPesewas);
+    return { ...priced, vehicleId, vehicleTypeId, totalPesewas, company: company ? { id:company.id,name:company.name } : null };
   }
   const fingerprint = input => createHash('sha256').update(JSON.stringify(input)).digest('hex');
   handle('visits:quote', (db,input) => db.transaction(() => preview(db,input))());
@@ -89,6 +92,7 @@ function registerVisitHandlers({ ipcMain, getDatabase, administrator, now, prici
     }
     const priced = preview(db,input,true), arrival = stamp(input.arrivalAt,'arrival time');
     if (cents(input.expectedTotalPesewas) !== priced.totalPesewas || JSON.stringify(input.expectedLines) !== JSON.stringify(priced.lines)) throw new Error('Prices changed or service details/worker compensation changed. Review the updated price before saving.');
+    if ((priced.company && input.expectedCompanyId === undefined) || (input.expectedCompanyId !== undefined && input.expectedCompanyId !== (priced.company?.id ?? null))) throw Error('Company assignment changed or was not reviewed. Review the updated quote before saving.');
     let vehicleId = priced.vehicleId;
     if (input.newVehicle) vehicleId = vehicles.createVehicle(db,input.newVehicle,user).id;
     const time = new Date(now()).toISOString(), number = `WB-${randomUUID()}`;
@@ -96,6 +100,7 @@ function registerVisitHandlers({ ipcMain, getDatabase, administrator, now, prici
     pricing.writeLines(db,visitId,priced.lines);
     db.prepare("INSERT INTO visit_details(transaction_id,arrival_at,currency,total_pesewas,creation_key,creation_payload) VALUES(?,?,'GHS',?,?,?)").run(visitId,arrival,priced.totalPesewas,submissionKey,payload);
     db.prepare("INSERT INTO visit_status_events(transaction_id,to_status,changed_at,changed_by) VALUES(?,'waiting',?,?)").run(visitId,time,user.id);
+    if (priced.company) companies.associate(db,visitId,priced.company.id,input.dueDate,'Company selected or inherited from vehicle at visit creation',user);
     audit(db,user,'visit_created',visitId);
     return read(db,visitId);
   }).immediate());
@@ -149,6 +154,7 @@ function registerVisitHandlers({ ipcMain, getDatabase, administrator, now, prici
     if (visit.status === 'cancelled') throw new Error('Payments cannot be recorded on a cancelled visit.');
     if (amount > visit.outstandingPesewas) throw new Error('Payment exceeds the outstanding balance.');
     const paidAt = stamp(input.paidAt,'payment date');
+    if (db.prepare('SELECT transaction_id FROM visit_company_snapshots WHERE transaction_id=?').get(visitId) && paidAt.slice(0,10)<visit.createdAt.slice(0,10)) throw Error('Company payment date cannot precede the visit charge date.');
     const paymentId = Number(db.prepare("INSERT INTO payments(transaction_id,amount,method,reference,status,received_by,paid_at) VALUES(?,?,?,?,'completed',?,?)").run(visitId,amount/100,method,reference,user.id,paidAt).lastInsertRowid);
     db.prepare('INSERT INTO payment_receipts(payment_id,submission_key,submission_payload,amount_pesewas) VALUES(?,?,?,?)').run(paymentId,submissionKey,payload,amount);
     audit(db,user,'visit_payment_recorded',visitId);

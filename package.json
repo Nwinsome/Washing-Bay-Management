@@ -1,17 +1,23 @@
 {
   "name": "wash-bay-manager",
   "version": "1.0.0",
-  "description": "",
+  "description": "Offline washing bay operations, accounts and financial management",
   "main": "main.js",
   "scripts": {
-  "dev": "node scripts/dev.cjs",
-  "dev:renderer": "vite",
-  "typecheck": "tsc --noEmit --incremental false",
-  "test": "node --test tests/*.test.cjs",
-  "build": "tsc && vite build",
-  "electron": "electron .",
-  "start": "electron ."
-},
+    "dev": "node scripts/dev.cjs",
+    "dev:renderer": "vite",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test": "node --test tests/*.test.cjs",
+    "build": "tsc && vite build",
+    "electron": "electron .",
+    "start": "electron .",
+    "test:desktop": "playwright test",
+    "test:packaged": "node scripts/test-packaged.cjs",
+    "prepare:desktop": "node scripts/prepare-desktop.cjs",
+    "pack:dir": "npm run build && npm run prepare:desktop && electron-builder --config electron-builder.cjs --win --x64 --dir",
+    "dist:win": "npm run build && npm run prepare:desktop && electron-builder --config electron-builder.cjs --win --x64",
+    "verify:package": "node scripts/verify-package.cjs"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -24,12 +30,14 @@
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^9.6.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^44.7.0",
+    "electron-builder": "^26.15.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
   }

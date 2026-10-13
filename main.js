@@ -6,25 +6,36 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 
-const isDevelopment = !app.isPackaged && process.argv.includes('--dev');
-let database;
-let applicationHandlers;
-
-function getDatabase() {
-  if (!database) {
-    const databasePath =
-      process.env.WASH_BAY_DATABASE_PATH ??
-      path.join(app.getPath('userData'), 'wash-bay-manager.sqlite');
-    database = new Database(databasePath);
-    database.pragma('foreign_keys = ON');
-    database.pragma('journal_mode = WAL');
-    database.transaction(() => {
-      for (const file of ['schema.sql','catalog.sql']) database.exec(fs.readFileSync(path.join(__dirname,'src','database',file),'utf8'));
-    })();
+// Keep the original data directory even when the installer product name changes.
+if (app.setPath) app.setPath('userData', process.env.WASH_BAY_USER_DATA_PATH ?? path.join(app.getPath('appData'), 'wash-bay-manager'));
+const safeIpcMain = { handle(channel, handler) {
+  function failure(error) {
+      console.error(`Operation ${channel} failed:`, error);
+      if (error?.name === 'TypeError' || (error?.code && error.code !== 'SQLITE_CONSTRAINT_TRIGGER')) {
+        throw new Error(error?.code === 'ERR_DLOPEN_FAILED'
+          ? 'The database component could not load. Reinstall the application; keep your business data and backups.'
+          : 'The operation could not be completed. Your records have been preserved. Check the input, available disk space and database location, then retry.');
+      }
+      throw new Error(typeof error?.message === 'string' ? error.message : 'The operation could not be completed. Please retry.');
   }
+  ipcMain.handle(channel, (...args) => {
+    try {
+      const result = handler(...args);
+      return result?.then ? result.catch(failure) : result;
+    } catch (error) { return failure(error); }
+  });
+} };
 
-  return database;
-}
+const isDevelopment = !app.isPackaged && process.argv.includes('--dev');
+let applicationHandlers;
+const storage = require('./database-storage.cjs').createDatabaseStorage({
+  Database, fs,
+  databasePath: process.env.WASH_BAY_DATABASE_PATH ?? path.join(app.getPath('userData'), 'wash-bay-manager.sqlite'),
+  userData: app.getPath('userData'), appVersion: app.getVersion?.() ?? require('./package.json').version,
+  schemaDirectory: path.join(__dirname,'src','database'),
+  onIdle:()=>{if(process.platform!=='darwin'&&BrowserWindow.getAllWindows?.()?.length===0)app.quit();},
+});
+function getDatabase() { return storage.getDatabase(); }
 
 function registerSetupHandlers() {
   function validateSender(event) {
@@ -37,8 +48,8 @@ function registerSetupHandlers() {
       throw new Error('Setup is only available from the application window.');
     }
   }
-  applicationHandlers = require('./app-api.cjs').registerApplicationHandlers({ ipcMain, getDatabase, validateSender });
-  ipcMain.handle('setup:status', (event) => {
+  applicationHandlers = require('./app-api.cjs').registerApplicationHandlers({ ipcMain: safeIpcMain, getDatabase, validateSender, settingsEnvironment: { storage, dialog, BrowserWindow, appVersion:app.getVersion?.() ?? require('./package.json').version, nativeImage:require('electron').nativeImage } });
+  safeIpcMain.handle('setup:status', (event) => {
     validateSender(event);
     const settings = getDatabase()
       .prepare('SELECT id FROM business_settings LIMIT 1')
@@ -46,7 +57,7 @@ function registerSetupHandlers() {
     return { isComplete: Boolean(settings) };
   });
 
-  ipcMain.handle('setup:complete', async (event, input) => {
+  safeIpcMain.handle('setup:complete', async (event, input) => {
     validateSender(event);
     for (const [field, limit] of [['businessName', 120], ['phone', 40], ['address', 500], ['fullName', 120], ['username', 64]]) {
       if (typeof input?.[field] !== 'string' || !input[field].trim() || input[field].trim().length > limit) {
@@ -90,6 +101,8 @@ function registerSetupHandlers() {
           ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
           : bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
       if (!validHeader) throw new Error('The logo file does not match its image format.');
+      const image = require('electron').nativeImage?.createFromBuffer(bytes);
+      if (image?.isEmpty()) throw new Error('The logo image is damaged or cannot be decoded. Choose another image.');
     }
 
     const db = getDatabase();
@@ -112,6 +125,7 @@ function registerSetupHandlers() {
     let savedLogoPath;
     try {
       const passwordHash = await bcrypt.hash(password, 12);
+      validateSender(event);
       if (db.prepare('SELECT id FROM business_settings LIMIT 1').get()) {
         throw new Error('Setup has already been completed.');
       }
@@ -142,6 +156,7 @@ function createWindow() {
     height: 800,
     minWidth: 800,
     minHeight: 600,
+    title: 'Washing Bay Management System',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -171,7 +186,7 @@ function createWindow() {
       'Wash Bay Manager could not open',
       `Could not load ${rendererTarget}.\n\n${message}\n\n${isDevelopment
         ? 'Run npm.cmd run dev to start Vite and Electron together.'
-        : 'Run npm.cmd run build, then npm.cmd start.'}`,
+        : app.isPackaged ? 'Reinstall the application. Keep your business data and backups.' : 'Run npm.cmd run build, then npm.cmd start.'}`,
     );
   }
   window.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
@@ -187,14 +202,20 @@ function createWindow() {
   loading.catch((error) => reportLoadFailure(error.message));
 }
 
-app.whenReady().then(() => {
-  registerSetupHandlers();
-  createWindow();
+if (app.requestSingleInstanceLock && !app.requestSingleInstanceLock()) {
+  app.quit();
+} else app.whenReady().then(() => {
+  try { storage.recover(); registerSetupHandlers(); createWindow(); }
+  catch (error) { dialog.showErrorBox('Database recovery requires attention', error.message + '\n\nKeep all database and safety backup files. The application has stopped to protect operational data.'); app.quit(); return; }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+app.on('second-instance', ()=>{const window=BrowserWindow.getAllWindows?.()?.[0];if(window){if(window.isMinimized())window.restore();window.show();window.focus();}});
+
+app.on('before-quit', event => { if (storage.busy) { event.preventDefault(); dialog.showErrorBox('Database maintenance in progress', 'Wait for the backup or restore to finish before quitting.'); } else storage.close(); });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

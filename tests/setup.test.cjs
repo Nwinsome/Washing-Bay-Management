@@ -12,10 +12,11 @@ const root = path.join(__dirname, '..');
 const source = stripTypeScriptTypes(fs.readFileSync(path.join(root, 'src/pages/setupValidation.ts'), 'utf8')).replace(/export /g, '');
 const validation = vm.runInNewContext(source + '\n({initialValues,validateStep})', { TextEncoder });
 const input = {businessName:' Sparkle Wash ',phone:'+233 24 123 4567',address:'Accra',fullName:'Admin',username:'admin',password:'a-safe-password'};
-function harness(development = false) {
+function harness(development = false, options = {}) {
   const db = new Database(':memory:');
   const handlers = {}, files = new Map(), removed = [];
   let ready, opened = 0;
+  const paths = [];
   const frame = {url: development ? 'http://localhost:5173/' : pathToFileURL(path.join(root, 'dist/index.html')).href};
   const sender = {mainFrame:frame};
   const event = {sender,senderFrame:frame};
@@ -26,13 +27,41 @@ function harness(development = false) {
   }
   const mockFs = {...fs,mkdirSync:()=>{},writeFileSync:(name,bytes)=>files.set(name,bytes),rmSync:name=>{removed.push(name);files.delete(name);}};
   const mockRequire = name => name === 'electron' ? {
-    app:{isPackaged:false,getPath:()=>path.join(root,'isolated-test-data'),whenReady:()=>({then:fn=>ready=fn}),on:()=>{}},
+    app:{isPackaged:Boolean(options.packaged),getPath:()=>path.join(root,'isolated-test-data'),setPath:(...args)=>paths.push(args),whenReady:()=>({then:fn=>ready=fn}),on:()=>{}},
     BrowserWindow:Window,ipcMain:{handle:(name,fn)=>handlers[name]=fn},dialog:{showErrorBox:()=>{}},
-  } : name === './app-api.cjs' ? require(path.join(root,'app-api.cjs')) : name === 'better-sqlite3' ? function(){opened++;return db;} : name === 'node:fs' ? mockFs : require(name);
-  vm.runInNewContext(fs.readFileSync(path.join(root,'main.js'),'utf8'),{require:mockRequire,process:{argv:development?['--dev']:[],env:{},platform:'win32'},__dirname:root,Buffer,Uint8Array,console});
+    nativeImage: options.nativeImage,
+  } : name === './app-api.cjs' ? require(path.join(root,'app-api.cjs')) : name === 'better-sqlite3' ? function(){opened++;return db;} : name === 'node:fs' ? mockFs : name.startsWith('./') ? require(path.join(root,name)) : require(name);
+  vm.runInNewContext(fs.readFileSync(path.join(root,'main.js'),'utf8'),{require:mockRequire,process:{argv:development?['--dev']:[],env:options.env??{},platform:'win32'},__dirname:root,Buffer,Uint8Array,console:{...console,error:()=>{}}});
   ready();
-  return {db,event,files,removed,status:()=>handlers['setup:status'](event),complete:value=>handlers['setup:complete'](event,value),handlers,get opened(){return opened;}};
+  return {db,event,files,removed,paths,status:()=>handlers['setup:status'](event),complete:value=>handlers['setup:complete'](event,value),handlers,get opened(){return opened;}};
 }
+
+test('main-process setup rejects damaged images even with a valid PNG signature',async()=>{
+  const h=harness(false,{nativeImage:{createFromBuffer:()=>({isEmpty:()=>true})}});
+  try {
+    await assert.rejects(h.complete({...input,logo:{mimeType:'image/png',bytes:new Uint8Array([137,80,78,71,13,10,26,10])}}),/damaged/);
+    assert.equal(h.opened,0);assert.equal(h.files.size,0);
+  }finally{h.db.close();}
+});
+test('setup revalidates its originating frame after asynchronous password hashing',async()=>{
+  const h=harness();try {
+    const pending=h.complete(input);h.event.senderFrame.url='https://untrusted.example/';
+    await assert.rejects(pending,/application window/);
+    assert.equal(h.db.prepare('SELECT count(*) n FROM business_settings').get().n,0);
+    assert.equal(h.db.prepare('SELECT count(*) n FROM users').get().n,0);
+  }finally{h.db.close();}
+});
+test('packaged product naming retains the historical user-data directory',()=>{
+  const h=harness(false,{packaged:true});try {
+    assert.deepEqual(h.paths[0],['userData',path.join(root,'isolated-test-data','wash-bay-manager')]);
+  }finally{h.db.close();}
+});
+test('desktop test data isolation can explicitly override the user-data directory',()=>{
+  const directory=path.join(root,'isolated-test-data');
+  const h=harness(false,{env:{WASH_BAY_USER_DATA_PATH:directory}});try {
+    assert.deepEqual(h.paths[0],['userData',directory]);assert.equal(h.opened,0);
+  }finally{h.db.close();}
+});
 test('validation catches empty, whitespace, phone, mismatch and bcrypt byte limits',()=>{
   const {initialValues,validateStep}=validation;
   assert.equal(Object.keys(validateStep(initialValues,1)).length,3);
@@ -68,7 +97,7 @@ test('rejects untrusted senders, malformed fields, unsafe passwords and invalid 
 test('user insert failure rolls back business settings and removes only new logo',async()=>{
   const h=harness();try{
     h.status();h.db.prepare("INSERT INTO users(username,password_hash,full_name,role) VALUES ('admin','existing-hash','Existing','admin')").run();
-    await assert.rejects(h.complete({...input,logo:{mimeType:'image/png',bytes:new Uint8Array([137,80,78,71,13,10,26,10])}}),/UNIQUE/);
+    await assert.rejects(h.complete({...input,logo:{mimeType:'image/png',bytes:new Uint8Array([137,80,78,71,13,10,26,10])}}),/records have been preserved/);
     assert.equal(h.db.prepare('SELECT count(*) AS n FROM business_settings').get().n,0);
     assert.equal(h.db.prepare('SELECT password_hash FROM users').get().password_hash,'existing-hash');
     assert.equal(h.files.size,0);assert.equal(h.removed.length,1);

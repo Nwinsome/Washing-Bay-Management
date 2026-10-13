@@ -1,3 +1,20 @@
+import type {SettingsData,BusinessSettingsInput,BackupRecord,BackupResult,BackupVerification,RestoreSelection,RestoreResult,BusinessPreferences} from './settings-api';
+import type {FinancialReport,ReportFilters,ReportTable,ReportRows} from './reports-api';
+export type CompanyTotals = { chargesPesewas:number; paymentsPesewas:number; outstandingPesewas:number; overduePesewas:number };
+export type Company = { id:number; name:string; contact_name:string; phone:string; email:string; address:string; is_active:number; credit_enabled:number; credit_limit_pesewas:number|null; terms_days:number|null; totals?:CompanyTotals };
+export type CompanyDetailsInput = { name:string; contactPerson:string; phone:string; email?:string; address?:string };
+export type CompanyVisit = { id:number; number:string; vehicleId:number|null; vehicle:string|null; status:string; chargedAt:string; cancelledAt:string|null; companyName:string; dueDate:string|null; totalPesewas:number; paidPesewas:number; outstandingPesewas:number; lines:{serviceName:string;quantity:number;amountPesewas:number}[] };
+export type CompanyPayment = { id:number;visitId:number;paidAt:string;status:string;method:FinancialMethod;reference:string;amountPesewas:number;batchId:number|null;allocationReason?:string };
+export type CompanyProfile = { company:Company;totals:CompanyTotals;visits:CompanyVisit[];vehicles:{id:number;registrationNumber:string;associatedAt:string}[];vehicleHistory:{id:number;vehicle_id:number;company_id:number|null;reason:string;changed_at:string;registrationNumber:string}[];payments:CompanyPayment[];audit:{id:number;action:string;details:string;created_at:string;administrator:string}[] };
+export type CompanyStatement = { company:Company;from:string;to:string;openingPesewas:number;chargesPesewas:number;paymentsPesewas:number;closingPesewas:number;charges:{type:string;visitId:number;number:string;date:string;amountPesewas:number}[];payments:CompanyPayment[];outstanding:CompanyVisit[];generatedAt:string };
+export type CompanyPaymentInput = {companyId:number;amountPesewas:number;method:FinancialMethod;paymentDate:string;reference?:string;allocationReason:string;requestKey:string;allocations:{visitId:number;amountPesewas:number}[]};
+export type FinancialMethod = 'cash' | 'mobile_money' | 'bank_transfer' | 'card' | 'other';
+export type ExpenseInput = { category: string; description: string; amountPesewas: number; method: FinancialMethod; businessDate: string; reference?: string; requestKey: string };
+export type ExpenseEvent = { id: number; category: string; description: string; amount_pesewas: number; method: FinancialMethod; business_date: string; reference: string; reverses_id: number | null; reversed_by: number | null; reason: string; administrator: string; recorded_at: string };
+export type FinanceSource = { id: number; method: FinancialMethod; date: string; amountPesewas: number; visitId?: number; workerId?: number; reversesId?: number | null };
+export type ClosingPreview = { businessDate: string; completedServices: number; serviceCharges: number; received: number; outstanding: number; payoutsPaid: number; expensesPaid: number; collections: Record<FinancialMethod, number>; cashExpenses: number; cashPayouts: number; netCash: number; token: string; payments: FinanceSource[]; payouts: FinanceSource[]; expenses: FinanceSource[]; legacyExpenses: {id:number}[]; legacyPayouts: {id:number}[]; legacyClosings: {id:number}[] };
+export type ClosingRecord = { id: number; business_date: string; snapshot: ClosingPreview & { openingPesewas: number; expectedPesewas: number }; opening_reason: string; actual_pesewas: number; variance_pesewas: number; explanation: string; administrator: string; closed_at: string; reopen_reason: string | null; reopened_at: string | null };
+export type ClosingData = { preview: ClosingPreview; history: ClosingRecord[]; carry: {id:number; actual_pesewas:number} | null };
 export type Administrator = { id: number; username: string; fullName: string; role: 'admin' };
 export type EarningsAccount = { earnedPesewas: number; paidPesewas: number; outstandingPesewas: number; payoutBlocked: boolean; legacyPayments: number };
 export type EarningsPeriod = { earnedPesewas: number; paidPesewas: number; completedServices: number; unconfigured: number; salaryServices: number };
@@ -17,10 +34,10 @@ export type Vehicle = { id: number; registrationNumber: string; vehicleTypeId: n
 export type VehiclesData = { vehicles: Vehicle[]; total: number; counts: { total: number; active: number; archived: number }; vehicleTypes: VehicleCategory[]; offset: number; limit: number };
 export type VehicleSnapshot = { registrationNumber: string; vehicleTypeName: string | null; make: string | null; model: string | null; color: string | null; customerName: string | null; customerPhone: string | null; provenance: 'migration' | 'recorded' };
 export type VisitStatus = 'waiting' | 'in_progress' | 'completed' | 'cancelled';
-export type VisitSelection = { mode: 'vehicle' | 'non_vehicle'; vehicleId?: number | null; newVehicle?: VehicleDetails | null; vehicleTypeId: number | null; serviceIds: number[]; assignments: { serviceId: number; workerId: number }[] };
-export type VisitQuote = ServiceQuote & { totalPesewas: number; vehicleId: number | null; vehicleTypeId: number | null };
+export type VisitSelection = { companyId?:number|null; dueDate?:string; mode: 'vehicle' | 'non_vehicle'; vehicleId?: number | null; newVehicle?: VehicleDetails | null; vehicleTypeId: number | null; serviceIds: number[]; assignments: { serviceId: number; workerId: number }[] };
+export type VisitQuote = ServiceQuote & { company:{id:number;name:string}|null; totalPesewas: number; vehicleId: number | null; vehicleTypeId: number | null };
 export type VisitSummary = { id: number; number: string; status: VisitStatus; vehicleId: number | null; createdAt: string; arrivalAt: string; startedAt: string | null; completedAt: string | null; cancelledAt: string | null; currency: string; registrationNumber: string | null; customerName: string | null; customerPhone: string | null; totalPesewas: number; paidPesewas: number; outstandingPesewas: number; paymentStatus: 'unpaid' | 'partial' | 'paid' | 'cancelled'; legacy: number };
-export type Visit = VisitSummary & { lines: ServiceQuote['lines']; payments: { id: number; method: string; reference: string | null; status: string; paidAt: string; amountPesewas: number }[]; history: { id: number; fromStatus: VisitStatus | null; toStatus: VisitStatus; changedAt: string }[] };
+export type Visit = VisitSummary & { company:{id:number;name:string;dueDate:string|null}|null; lines: ServiceQuote['lines']; payments: { id: number; method: string; reference: string | null; status: string; paidAt: string; amountPesewas: number }[]; history: { id: number; fromStatus: VisitStatus | null; toStatus: VisitStatus; changedAt: string }[] };
 export type VisitList = { visits: VisitSummary[]; total: number; offset: number; limit: number };
 export type WorkerDetails = { fullName: string; phone: string; email?: string | null; jobTitle?: string | null; hireDate?: string | null };
 export type Worker = { id: number; fullName: string; phone: string | null; email: string | null; jobTitle: string | null; hireDate: string | null; isActive: number; createdAt: string; updatedAt: string };
@@ -38,6 +55,8 @@ export type ServiceSelection = { vehicleId?: number | null; vehicleTypeId: numbe
 export type ServiceQuote = { lines: { serviceId: number | null; serviceName: string; serviceKind: ServiceKind; serviceRole: ServiceRole; serviceCode: ServiceCode; quantity: number; unitPrice: number; lineTotal: number; workerAssignment: WorkerAssignment | null }[]; subtotal: number; total: number };
 export type DashboardData = {
   user: Administrator; date: string;
+  preferences:BusinessPreferences;
+  companySummary: {outstandingPesewas:number;overduePesewas:number};
   business: { name: string; phone: string | null; address: string | null; currency: string };
   summary: { completedToday: number; activeWashes: number; collectedToday: number; expensesToday: number; customers: number; activeWorkers: number; activeServices: number; outstandingBalance: number; waitingVehicles: number; inProgressVehicles: number };
   recent: { id: number; number: string; status: string; total: number; createdAt: string; customer: string | null; vehicle: string | null }[];
@@ -45,6 +64,34 @@ export type DashboardData = {
 declare global {
   interface Window {
     appApi: {
+      getSettings: ()=>Promise<SettingsData>;
+      updateBusinessSettings: (input:BusinessSettingsInput)=>Promise<{success:true}>;
+      updateAdministratorAccount: (input:{fullName:string;username:string;currentPassword:string;newPassword?:string})=>Promise<{success:true;signInRequired:true}>;
+      getBackupHistory: ()=>Promise<{backups:BackupRecord[];defaultLocation:string}>;
+      createDatabaseBackup: ()=>Promise<BackupResult>;
+      verifyDatabaseBackup: ()=>Promise<BackupVerification>;
+      selectDatabaseRestore: ()=>Promise<RestoreSelection>;
+      cancelDatabaseRestore: ()=>Promise<{success:true}>;
+      restoreDatabase: (input:{token:string;currentPassword:string;confirmation:string})=>Promise<RestoreResult>;
+      getReport: (input:ReportFilters)=>Promise<FinancialReport>;
+      getReportRows: (input:ReportFilters & {table:ReportTable;offset?:number})=>Promise<ReportRows>;
+      exportReport: (input:ReportFilters)=>Promise<{filename:string;csv:string;from:string;to:string}>;
+      getCompanies: (input?:{search?:string;status?:string;offset?:number})=>Promise<{companies:Company[];total:number;offset:number}>;
+      getCompanyOptions: ()=>Promise<{companies:Company[]}>;
+      createCompany: (input:CompanyDetailsInput)=>Promise<Company>;
+      updateCompany: (input:CompanyDetailsInput & {id:number})=>Promise<Company>;
+      configureCompany: (input:{id:number;isActive:boolean;creditEnabled:boolean;creditLimitPesewas:number|null;termsDays:number|null})=>Promise<Company>;
+      getCompany: (input:{id:number})=>Promise<CompanyProfile>;
+      associateCompanyVehicle: (input:{vehicleId:number;companyId:number|null;reason:string})=>Promise<{success:true}>;
+      associateCompanyVisit: (input:{visitId:number;companyId:number;dueDate?:string;reason:string})=>Promise<{companyId:number;companyName:string;dueDate:string|null}>;
+      recordCompanyPayment: (input:CompanyPaymentInput)=>Promise<{id:number}>;
+      getCompanyStatement: (input:{id:number;from:string;to:string})=>Promise<CompanyStatement>;
+      getExpenses: (input: {search?:string;from?:string;to?:string;category?:string;method?:string;offset?:number}) => Promise<{rows:ExpenseEvent[];total:number;offset:number}>;
+      createExpense: (input: ExpenseInput) => Promise<{id:number}>;
+      reverseExpense: (input: {id:number;businessDate:string;reason:string}) => Promise<{id:number}>;
+      getClosingPreview: (input: {businessDate:string}) => Promise<ClosingData>;
+      confirmClosing: (input: {businessDate:string;token:string;openingPesewas:number;openingReason:string;carryFrom?:number;actualPesewas:number;explanation:string}) => Promise<{id:number}>;
+      reopenClosing: (input: {id:number;reason:string}) => Promise<{success:true}>;
       getSession: () => Promise<Administrator | null>;
       login: (input: { username: string; password: string }) => Promise<{ ok: true; user: Administrator } | { ok: false; message: string }>;
       logout: () => Promise<{ success: true }>;
@@ -56,7 +103,7 @@ declare global {
       getWorkerEarningsDetail: (input: EarningsFilter & { workerId: number }) => Promise<EarningsDetail>;
       recordWorkerPayout: (input: { workerId: number; amountPesewas: number; paymentDate: string; method: 'cash' | 'card' | 'mobile_money' | 'bank_transfer' | 'other'; reference?: string; note?: string; requestKey: string }) => Promise<{ id: number; account: EarningsAccount }>;
       quoteVisit: (input: VisitSelection) => Promise<VisitQuote>;
-      createVisit: (input: VisitSelection & { arrivalAt?: string; expectedTotalPesewas: number; expectedLines: ServiceQuote['lines']; requestKey: string }) => Promise<Visit>;
+      createVisit: (input: VisitSelection & { arrivalAt?: string; expectedCompanyId?: number|null; expectedTotalPesewas: number; expectedLines: ServiceQuote['lines']; requestKey: string }) => Promise<Visit>;
       getVisits: (input?: { search?: string; status?: 'all' | VisitStatus; paymentStatus?: 'all' | 'paid' | 'partial' | 'unpaid'; offset?: number }) => Promise<VisitList>;
       getVisit: (input: { id: number }) => Promise<Visit>;
       setVisitStatus: (input: { id: number; status: VisitStatus }) => Promise<Visit>;
