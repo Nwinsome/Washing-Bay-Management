@@ -15,7 +15,7 @@ const input = {businessName:' Sparkle Wash ',phone:'+233 24 123 4567',address:'A
 function harness(development = false, options = {}) {
   const db = new Database(':memory:');
   const handlers = {}, files = new Map(), removed = [];
-  let ready, opened = 0;
+  let ready, opened = 0, enrollment = {};
   const paths = [];
   const frame = {url: development ? 'http://localhost:5173/' : pathToFileURL(path.join(root, 'dist/index.html')).href};
   const sender = {mainFrame:frame};
@@ -33,7 +33,7 @@ function harness(development = false, options = {}) {
   } : name === './app-api.cjs' ? require(path.join(root,'app-api.cjs')) : name === 'better-sqlite3' ? function(){opened++;return db;} : name === 'node:fs' ? mockFs : name.startsWith('./') ? require(path.join(root,name)) : require(name);
   vm.runInNewContext(fs.readFileSync(path.join(root,'main.js'),'utf8'),{require:mockRequire,process:{argv:development?['--dev']:[],env:options.env??{},platform:'win32'},__dirname:root,Buffer,Uint8Array,console:{...console,error:()=>{}}});
   ready();
-  return {db,event,files,removed,paths,status:()=>handlers['setup:status'](event),complete:value=>handlers['setup:complete'](event,value),handlers,get opened(){return opened;}};
+  return {db,event,files,removed,paths,status:()=>handlers['setup:status'](event),complete:value=>handlers['setup:complete'](event,{...value,...enrollment}),enroll:async()=>{const p=await handlers['recovery:prepare'](event,{kind:'setup'});enrollment={recoveryId:p.id,savedRecovery:true};},handlers,get opened(){return opened;}};
 }
 
 test('main-process setup rejects damaged images even with a valid PNG signature',async()=>{
@@ -75,6 +75,7 @@ test('validation catches empty, whitespace, phone, mismatch and bcrypt byte limi
 test('setup persists GHS and hashed admin atomically; duplicate preserves records',async()=>{
   const h=harness();try{
     assert.equal(h.opened,0);assert.equal(h.status().isComplete,false);
+    await h.enroll();
     await h.complete(input);
     const settings=h.db.prepare('SELECT * FROM business_settings').get();
     assert.equal(settings.currency,'GHS');assert.equal(settings.business_name,'Sparkle Wash');
@@ -96,7 +97,7 @@ test('rejects untrusted senders, malformed fields, unsafe passwords and invalid 
 });
 test('user insert failure rolls back business settings and removes only new logo',async()=>{
   const h=harness();try{
-    h.status();h.db.prepare("INSERT INTO users(username,password_hash,full_name,role) VALUES ('admin','existing-hash','Existing','admin')").run();
+    await h.enroll();h.status();h.db.prepare("INSERT INTO users(username,password_hash,full_name,role) VALUES ('admin','existing-hash','Existing','admin')").run();
     await assert.rejects(h.complete({...input,logo:{mimeType:'image/png',bytes:new Uint8Array([137,80,78,71,13,10,26,10])}}),/records have been preserved/);
     assert.equal(h.db.prepare('SELECT count(*) AS n FROM business_settings').get().n,0);
     assert.equal(h.db.prepare('SELECT password_hash FROM users').get().password_hash,'existing-hash');
@@ -105,6 +106,7 @@ test('user insert failure rolls back business settings and removes only new logo
 });
 test('simultaneous setup submissions create exactly one business and admin',async()=>{
   const h=harness();try{
+    await h.enroll();
     const results=await Promise.allSettled([h.complete(input),h.complete(input)]);
     assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
     assert.equal(h.db.prepare('SELECT count(*) AS n FROM users').get().n,1);
@@ -117,4 +119,15 @@ test('existing currency is not changed by setup status or a repeated submission'
     assert.equal(h.status().isComplete,true);await assert.rejects(h.complete(input));
     assert.equal(h.db.prepare('SELECT currency FROM business_settings').get().currency,'USD');
   }finally{h.db.close();}
+});
+test('setup requires a generated code and explicit saved confirmation in the main process',async()=>{
+ const h=harness();try{
+  await assert.rejects(h.complete(input),/confirm that you saved/);
+  assert.equal(h.db.prepare('SELECT count(*) n FROM business_settings').get().n,0);
+  const p=await h.handlers['recovery:prepare'](h.event,{kind:'setup'});
+  await assert.rejects(h.handlers['setup:complete'](h.event,{...input,recoveryId:p.id,savedRecovery:false}),/confirm that you saved/);
+  await h.handlers['setup:complete'](h.event,{...input,recoveryId:p.id,savedRecovery:true});
+  assert.match(h.db.prepare('SELECT code_hash FROM administrator_recovery').get().code_hash,/^[a-f0-9]{64}$/);
+  await assert.rejects(h.handlers['recovery:prepare'](h.event,{kind:'setup'}),/already been completed/);
+ }finally{h.db.close();}
 });

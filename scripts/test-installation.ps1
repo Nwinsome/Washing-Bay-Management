@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$installer = Join-Path $workspace 'release/Washing-Bay-Management-System-1.0.0-Setup-x64.exe'
+$version = (Get-Content -LiteralPath (Join-Path $workspace 'package.json') -Raw | ConvertFrom-Json).version
+$installer = Join-Path $workspace "release/Washing-Bay-Management-System-$version-Setup-x64.exe"
 if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Build the installer first.' }
 $guid = & node -e "const {UUID}=require('builder-util-runtime');console.log(UUID.v5('com.washbay.manager',UUID.parse('50e065bc-3134-11e6-9bab-38c9862bdaf3')));"
 if ($LASTEXITCODE -ne 0) { throw 'Could not determine the installer identity.' }

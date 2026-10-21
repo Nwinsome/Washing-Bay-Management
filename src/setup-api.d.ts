@@ -5,6 +5,8 @@ declare global {
     setupApi: {
       getStatus: () => Promise<{ isComplete: boolean }>;
       complete: (input: {
+        recoveryId: string;
+        savedRecovery: boolean;
         businessName: string;
         phone: string;
         address: string;

@@ -27,6 +27,6 @@ Native folder selections and restore consent use deterministic substitutes in au
 
 ## Limitations and accounting rules
 
-Windows x64 is the configured target. This is an unsigned local installer with the default Electron icon. No automatic updater is implemented. Clean-machine acceptance, actual native dialogs, physical printing, access permissions and long-running acceptance remain necessary after automated desktop checks.
+Windows x64 is the configured target. The current installer is unsigned and uses the existing Washing Bay logo. The original 1.0.0 installer used the default icon; see [current release verification](RELEASE-1.0.2.md) for the new build. No automatic updater is implemented. Clean-machine acceptance, actual native dialogs, physical printing, access permissions and long-running acceptance remain necessary after automated desktop checks.
 
 Current ledgers use integer pesewas. Legacy REAL amounts remain intact and carry reconciliation warnings where required. Opening cash must be explicit or carried from a verified closing. Company credit is debt, not collection. Receipt dates and completion dates are distinct. Salary accrual/payout, refunds, full accrual accounting and net profit remain unimplemented; reports label cash movement/recorded outflow differences instead. Backups are not encrypted or cryptographically signed; only the application's compatible validated format is accepted.

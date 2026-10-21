@@ -13,8 +13,16 @@ fs.writeFileSync(path.join(target, 'package.json'), JSON.stringify(runtime, null
 const sources = ['main.js', 'preload.js', 'database-storage.cjs', 'logo-assets.cjs',
   ...fs.readdirSync(root).filter(name => name.endsWith('-api.cjs'))];
 for (const name of sources) fs.copyFileSync(path.join(root, name), path.join(target, name));
+fs.mkdirSync(path.join(target, 'assets'), { recursive: true });
+fs.copyFileSync(path.join(root, 'assets/washing-bay-logo.ico'), path.join(target, 'assets/washing-bay-logo.ico'));
 for (const directory of ['dist', 'src/database']) {
   const destination = path.join(target, directory);
+  // Clear only this known build-output directory so old hashed bundles cannot ship.
+  if(directory==='dist'){
+    const resolved=path.resolve(destination);
+    if(resolved!==path.join(root,'.desktop-app','dist')||fs.lstatSync(target).isSymbolicLink())throw Error('Unsafe renderer staging directory.');
+    fs.rmSync(resolved,{recursive:true,force:true});
+  }
   fs.mkdirSync(destination, { recursive: true });
   fs.cpSync(path.join(root, directory), destination, { recursive: true,
     filter: filename => !filename.endsWith('.ts') });

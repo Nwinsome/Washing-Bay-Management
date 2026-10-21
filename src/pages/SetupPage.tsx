@@ -2,8 +2,11 @@
 import { ArrowLeft, ArrowRight, Check, Droplets, ImagePlus, ShieldCheck } from 'lucide-react';
 import { initialValues, validateStep, type SetupValues, type FieldErrors } from './setupValidation';
 import './SetupPage.css';
+import {SavedRecoveryCode} from './RecoveryPanel';
 
 export default function SetupPage({ onComplete }: { onComplete?: () => void }) {
+  const [recovery,setRecovery]=useState<{id:string;code:string}|null>(null);
+  const [savedRecovery,setSavedRecovery]=useState(false);
   const [values, setValues] = useState<SetupValues>(initialValues);
   const [step, setStep] = useState<1 | 2>(1);
   const [logo, setLogo] = useState<File | null>(null);
@@ -57,9 +60,11 @@ export default function SetupPage({ onComplete }: { onComplete?: () => void }) {
     if (step === 1) { setStep(2); return; }
     submitting.current = true; setSaving(true);
     try {
-      await window.setupApi.complete({ businessName: values.businessName.trim(), phone: values.phone.trim(), address: values.address.trim(), fullName: values.fullName.trim(), username: values.username.trim(), password: values.password,
+      if (!recovery) { setRecovery(await window.appApi.prepareRecovery({kind:'setup'})); return; }
+      if (!savedRecovery) throw new Error('Confirm that you saved your recovery code.');
+      await window.setupApi.complete({ recoveryId:recovery.id, savedRecovery, businessName: values.businessName.trim(), phone: values.phone.trim(), address: values.address.trim(), fullName: values.fullName.trim(), username: values.username.trim(), password: values.password,
         logo: logo ? { mimeType: logo.type, bytes: new Uint8Array(await logo.arrayBuffer()) } : undefined });
-      setValues(initialValues); setLogo(null); setStatus('complete');
+      setRecovery(null); setValues(initialValues); setLogo(null); setStatus('complete');
     } catch (reason: unknown) { setError(reason instanceof Error ? reason.message : 'Unable to save setup. Your details are still here; please try again.'); }
     finally { submitting.current = false; setSaving(false); }
   }
@@ -97,9 +102,10 @@ export default function SetupPage({ onComplete }: { onComplete?: () => void }) {
                 {field('fullName', 'Full name', { autoComplete: 'name', placeholder: 'Administrator’s full name', maxLength: 120 })}
                 {field('username', 'Username', { autoComplete: 'username', placeholder: 'Choose a username', maxLength: 64 })}
                 <div className="password-grid">{field('password', 'Password', { type: 'password', autoComplete: 'new-password', hint: 'At least 8 characters. Maximum 72 UTF-8 bytes.' })}{field('confirmPassword', 'Confirm password', { type: 'password', autoComplete: 'new-password', placeholder: 'Repeat your password' })}</div>
+                {recovery&&<SavedRecoveryCode code={recovery.code} saved={savedRecovery} onSaved={setSavedRecovery}/>}
                 <div className="security-note"><ShieldCheck size={18} aria-hidden="true" /><p>Your password is securely hashed before it is saved. Keep your administrator credentials safe.</p></div>
               </>}
-              <div className="form-actions">{step === 2 ? <button className="secondary-button" type="button" onClick={() => { setError(''); setErrors({}); setStep(1); }}><ArrowLeft size={17} aria-hidden="true" /> Back</button> : <span className="required-note">* Required fields</span>}<button className="primary-button" type="submit">{saving ? <><span className="spinner" /> Saving setup…</> : <>{step === 1 ? 'Continue' : 'Finish setup'}<ArrowRight size={17} aria-hidden="true" /></>}</button></div>
+              <div className="form-actions">{step === 2 ? <button className="secondary-button" type="button" onClick={() => { setError(''); setErrors({}); setStep(1); }}><ArrowLeft size={17} aria-hidden="true" /> Back</button> : <span className="required-note">* Required fields</span>}<button className="primary-button" type="submit">{saving ? <><span className="spinner" /> Saving setup…</> : <>{step === 1 ? 'Continue' : (recovery?'Confirm saved code and finish':'Generate recovery code')}<ArrowRight size={17} aria-hidden="true" /></>}</button></div>
             </fieldset></form></>}
       </div><footer className="workspace-footer"><ShieldCheck size={15} aria-hidden="true" /> Your setup stays on this computer.</footer>
     </div></main>;

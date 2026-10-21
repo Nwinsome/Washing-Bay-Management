@@ -768,8 +768,8 @@ CREATE INDEX IF NOT EXISTS idx_report_legacy_expense_date ON expenses(substr(exp
 CREATE TABLE IF NOT EXISTS application_metadata (
  id INTEGER PRIMARY KEY CHECK(id=1),product_id TEXT NOT NULL,schema_version INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO application_metadata VALUES(1,'wash-bay-manager',11);
-UPDATE application_metadata SET schema_version=11 WHERE product_id='wash-bay-manager' AND schema_version<11;
+INSERT OR IGNORE INTO application_metadata VALUES(1,'wash-bay-manager',12);
+UPDATE application_metadata SET schema_version=12 WHERE product_id='wash-bay-manager' AND schema_version<12;
 CREATE TABLE IF NOT EXISTS business_preferences (
  business_id INTEGER PRIMARY KEY REFERENCES business_settings(id) ON DELETE CASCADE,
  date_format TEXT NOT NULL CHECK(date_format IN ('long','iso','day_first')),
@@ -780,3 +780,12 @@ CREATE TABLE IF NOT EXISTS business_logo_assets (
  mime_type TEXT NOT NULL CHECK(mime_type IN ('image/png','image/jpeg','image/webp')),
  bytes BLOB NOT NULL CHECK(typeof(bytes)='blob' AND length(bytes)>0 AND length(bytes)<=5242880)
 );
+
+-- Additive migration preserves existing users and operational records.
+CREATE TABLE IF NOT EXISTS administrator_recovery (
+ user_id INTEGER PRIMARY KEY REFERENCES users(id), code_hash TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS recovery_attempts (
+ id INTEGER PRIMARY KEY CHECK(id=1), failures INTEGER NOT NULL DEFAULT 0, blocked_until INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO recovery_attempts(id) VALUES(1);

@@ -4,6 +4,7 @@ function registerApplicationHandlers({ ipcMain, getDatabase, validateSender, now
   const states = new WeakMap();
   let sessionEpoch=0;
   let settingsHandlers;
+  let recoveryHandlers;
   const dummyHash = bcrypt.hashSync('unused-account-verification', 12);
   const idleLimit = 30 * 60 * 1000;
   function state(sender) {
@@ -15,6 +16,7 @@ function registerApplicationHandlers({ ipcMain, getDatabase, validateSender, now
     current.userId = null;
     current.revision++;
     settingsHandlers?.discardForSender(sender);
+    recoveryHandlers?.discard(sender);
   }
   function administrator(event) {
     validateSender(event);
@@ -45,6 +47,7 @@ function registerApplicationHandlers({ ipcMain, getDatabase, validateSender, now
     }finally{current.securityBusy=false;}
   }
   settingsHandlers=require('./settings-api.cjs').registerSettingsHandlers({ipcMain,getDatabase,administrator,verifyCurrentPassword,sessionIdentity,isSessionCurrent,revokeAll,now,...settingsEnvironment});
+  recoveryHandlers=require('./recovery-api.cjs').registerRecoveryHandlers({ipcMain,getDatabase,validateSender,verifyCurrentPassword,isSessionCurrent,revokeAll,now,getEpoch:()=>sessionEpoch});
   ipcMain.handle('auth:session', event => administrator(event));
   ipcMain.handle('auth:login', async (event, input) => {
     validateSender(event);
@@ -118,7 +121,7 @@ function registerApplicationHandlers({ ipcMain, getDatabase, validateSender, now
   const companies = require('./companies-api.cjs').registerCompanyHandlers({ ipcMain, getDatabase, administrator, now });
   const earnings = require('./earnings-api.cjs').registerEarningsHandlers({ ipcMain, getDatabase, administrator, now });
   require('./visits-api.cjs').registerVisitHandlers({ ipcMain, getDatabase, administrator, now, pricing, vehicles, earnings, companies });
-  return { revoke, revokeAll };
+  return { revoke, revokeAll, recoveryHandlers };
 }
 
 module.exports = { registerApplicationHandlers };

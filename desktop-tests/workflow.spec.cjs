@@ -44,7 +44,9 @@ async function setup() {
   await page.locator('#username').fill('qa-admin');
   await page.locator('#password').fill(password);
   await page.locator('#confirmPassword').fill(password);
-  await page.getByRole('button', { name: 'Finish setup' }).click();
+  await page.getByRole('button', { name: 'Generate recovery code' }).click();
+  await page.getByRole('checkbox', { name: 'I have saved this recovery code securely.' }).check();
+  await page.getByRole('button', { name: 'Confirm saved code and finish' }).click();
   await expect(page.locator('#login-username')).toBeVisible();
   await page.locator('#login-username').fill('qa-admin');
   await page.locator('#login-password').fill(password);
@@ -196,4 +198,21 @@ test('desktop navigation, searchable category, CSV download, print PDF, resize, 
   await expect(page.locator('#login-username')).toBeVisible();
   await expect(api(page, 'getReport', { preset: 'today' })).rejects.toThrow(/SESSION_EXPIRED/);
   expect(errors).toEqual([]);
+});
+test('offline recovery UI confirms replacement code and returns username for sign-in',async()=>{
+ await setup();
+ const initial=await api(page,'prepareRecovery',{kind:'replace',password});
+ await api(page,'confirmRecovery',{id:initial.id,saved:true});
+ await page.reload();
+ await page.getByRole('button',{name:'Forgot password?'}).click();
+ await page.getByLabel('Recovery code',{exact:true}).fill(initial.code);
+ await page.getByLabel('New password',{exact:true}).fill('recovered-desktop-password');
+ await page.getByLabel('Confirm new password',{exact:true}).fill('recovered-desktop-password');
+ await page.getByRole('button',{name:'Generate recovery code',exact:true}).click();
+ await page.getByRole('checkbox',{name:'I have saved this recovery code securely.'}).check();
+ await page.getByRole('button',{name:'Confirm saved code and finish'}).click();
+ await expect(page.getByRole('status')).toContainText('Your username is qa-admin');
+ await page.locator('#login-password').fill('recovered-desktop-password');
+ await page.getByRole('button',{name:'Sign in',exact:true}).click();
+ await expect(page.getByRole('navigation',{name:'Main navigation'})).toBeVisible();
 });

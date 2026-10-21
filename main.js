@@ -27,6 +27,7 @@ const safeIpcMain = { handle(channel, handler) {
 } };
 
 const isDevelopment = !app.isPackaged && process.argv.includes('--dev');
+if (process.platform === 'win32') app.setAppUserModelId?.('com.washbay.manager');
 let applicationHandlers;
 const storage = require('./database-storage.cjs').createDatabaseStorage({
   Database, fs,
@@ -116,10 +117,12 @@ function registerSetupHandlers() {
         VALUES (1, ?, ?, ?, ?, 'GHS')
       `).run(businessName, phone, address, logoPath);
 
+      const recoveryHash = applicationHandlers.recoveryHandlers.setupHash(event,input);
       db.prepare(`
         INSERT INTO users (username, password_hash, full_name, role)
         VALUES (?, ?, ?, 'admin')
       `).run(username, passwordHash, fullName);
+      db.prepare('INSERT INTO administrator_recovery(user_id,code_hash) SELECT id,? FROM users WHERE username=?').run(recoveryHash,username);
     });
 
     let savedLogoPath;
@@ -141,6 +144,7 @@ function registerSetupHandlers() {
       fs.writeFileSync(savedLogoPath, Buffer.from(logo.bytes));
       }
       completedSetup(savedLogoPath ?? null, passwordHash);
+      applicationHandlers.recoveryHandlers.discard(event.sender);
     } catch (error) {
       if (savedLogoPath) fs.rmSync(savedLogoPath, { force: true });
       throw error;
@@ -157,6 +161,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     title: 'Washing Bay Management System',
+    icon: path.join(__dirname, 'assets', 'washing-bay-logo.ico'),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

@@ -22,3 +22,119 @@ test('future active schema versions are rejected before migrations alter any dat
 
 test('validation checks physical SQLite integrity and foreign-key references beyond the bundle checksum',async()=>{const h=harness();try{const backup=await h.storage.createBackup(path.join(h.root,'destination')),filename=path.join(backup.folder,'database.sqlite'),original=fs.readFileSync(filename);let copy=new Database(filename);copy.pragma('foreign_keys=OFF');copy.prepare("INSERT INTO payments(transaction_id,amount,method) VALUES(999,1,'cash')").run();copy.close();updateManifest(backup.folder);assert.throws(()=>h.storage.inspect(backup.folder),/broken financial or application references/);fs.writeFileSync(filename,original);const damaged=Buffer.from(original);damaged[100]=255;fs.writeFileSync(filename,damaged);updateManifest(backup.folder);assert.throws(()=>h.storage.inspect(backup.folder),/integrity|malformed|not a database/i);assert.equal(h.db.prepare('SELECT count(*) n FROM payments').get().n,0);}finally{h.cleanup();}});
 test('backup verification rejects plaintext account hashes and missing active administrators',async()=>{const h=harness();try{const backup=await h.storage.createBackup(path.join(h.root,'destination')),filename=path.join(backup.folder,'database.sqlite'),original=fs.readFileSync(filename);let copy=new Database(filename);copy.prepare("UPDATE users SET password_hash='plaintext-password'").run();copy.close();updateManifest(backup.folder);assert.throws(()=>h.storage.inspect(backup.folder),/password hashes/);fs.writeFileSync(filename,original);copy=new Database(filename);copy.prepare('UPDATE users SET is_active=0').run();copy.close();updateManifest(backup.folder);assert.throws(()=>h.storage.inspect(backup.folder),/active administrator/);assert.equal(h.db.prepare('SELECT is_active FROM users WHERE id=1').get().is_active,1);}finally{h.cleanup();}});
+test('backup restore reinstates recovery hash and persistent cooldown from backup date',async()=>{
+ const h=harness();try{
+  const oldHash=createHash('sha256').update('old random fixture').digest('hex'),newHash=createHash('sha256').update('new random fixture').digest('hex');
+  h.db.prepare('INSERT INTO administrator_recovery VALUES(1,?)').run(oldHash);
+  h.db.prepare('UPDATE recovery_attempts SET failures=3,blocked_until=123456 WHERE id=1').run();
+  const backup=await h.storage.createBackup(path.join(h.root,'destination'));
+  h.db.prepare('UPDATE administrator_recovery SET code_hash=?').run(newHash);
+  h.db.prepare('UPDATE recovery_attempts SET failures=0,blocked_until=0 WHERE id=1').run();
+  await h.storage.restore(h.storage.stageRestore(backup.folder),{id:1,username:'original-admin'});
+  const restored=h.storage.getDatabase();assert.equal(restored.prepare('SELECT code_hash FROM administrator_recovery').get().code_hash,oldHash);
+  assert.deepEqual(restored.prepare('SELECT failures,blocked_until FROM recovery_attempts').get(),{failures:3,blocked_until:123456});
+ }finally{h.cleanup();}
+});
+// Reproduce the released schema-11 bundle: identical operational schema, no
+// recovery tables, and version 11 in both metadata and the original manifest.
+async function legacyBackup(h){
+ const backup=await h.storage.createBackup(path.join(h.root,'legacy-destination'));
+ const filename=path.join(backup.folder,'database.sqlite'),copy=new Database(filename);
+ try{copy.exec('DROP TABLE administrator_recovery; DROP TABLE recovery_attempts; UPDATE application_metadata SET schema_version=11');}finally{copy.close();}
+ const manifestPath=path.join(backup.folder,'manifest.json'),manifest=JSON.parse(fs.readFileSync(manifestPath,'utf8'));
+ manifest.schemaVersion=11;fs.writeFileSync(manifestPath,JSON.stringify(manifest));updateManifest(backup.folder);
+ return {...backup,filename};
+}
+function operationalSnapshot(db){
+ return Object.fromEntries(['business_settings','users','transactions','transaction_services','payments','payment_receipts','company_payment_allocations','financial_closings','worker_payout_receipts'].map(table=>[table,db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
+}
+test('schema-11 bundle is verified read-only, migrated only in staging, and restored with all operational data',async()=>{
+ const h=harness();try{
+  populate(h);h.db.prepare('INSERT INTO business_logo_assets VALUES(1,?,?)').run('image/png',png);
+  const expected=operationalSnapshot(h.db),backup=await legacyBackup(h),original=fs.readFileSync(backup.filename),manifest=fs.readFileSync(path.join(backup.folder,'manifest.json'));
+  h.db.prepare("UPDATE business_settings SET business_name='Current data'").run();
+  h.db.prepare('INSERT INTO administrator_recovery VALUES(1,?)').run('a'.repeat(64));
+  assert.equal(h.storage.inspect(backup.folder).schemaVersion,11);
+  const staged=h.storage.stageRestore(backup.folder);
+  assert.equal(staged.databaseSha256,createHash('sha256').update(original).digest('hex'));
+  assert.notEqual(staged.stageDatabaseSha256,staged.databaseSha256);
+  const stage=new Database(staged.stage,{readonly:true});try{
+   assert.equal(stage.prepare('SELECT schema_version FROM application_metadata').get().schema_version,12);
+   assert.deepEqual(operationalSnapshot(stage),expected);
+   assert.equal(stage.prepare('SELECT count(*) n FROM administrator_recovery').get().n,0);
+  }finally{stage.close();}
+  const result=await h.storage.restore(staged,{id:1,username:'original-admin'}),restored=h.storage.getDatabase();
+  assert.deepEqual(operationalSnapshot(restored),expected);
+  assert.deepEqual(restored.prepare('SELECT bytes FROM business_logo_assets').get().bytes,png);
+  assert.equal(restored.prepare('SELECT count(*) n FROM administrator_recovery').get().n,0);
+  assert.deepEqual(restored.prepare('SELECT failures,blocked_until FROM recovery_attempts').get(),{failures:0,blocked_until:0});
+  assert.equal(await bcrypt.compare('original-test-password',restored.prepare('SELECT password_hash FROM users').get().password_hash),true);
+  const safety=new Database(h.storage.inspect(result.safetyBackup).filename,{readonly:true});try{
+   assert.equal(safety.prepare('SELECT business_name FROM business_settings').get().business_name,'Current data');
+   assert.equal(safety.prepare('SELECT code_hash FROM administrator_recovery').get().code_hash,'a'.repeat(64));
+  }finally{safety.close();}
+  assert.equal(fs.existsSync(result.rollbackFile),true);assert.equal(fs.existsSync(h.storage.journalPath),false);
+  assert.deepEqual(fs.readFileSync(backup.filename),original);assert.deepEqual(fs.readFileSync(path.join(backup.folder,'manifest.json')),manifest);
+ }finally{h.cleanup();}
+});
+test('invalid schema-11 bundles are rejected before migration and leave active credentials and financial records unchanged',async()=>{
+ for(const damage of ['checksum','trigger','missing-table','password','metadata','references','unsupported-version']){
+  const h=harness();try{
+   populate(h);const backup=await legacyBackup(h),before=operationalSnapshot(h.db);
+   if(damage==='checksum')fs.appendFileSync(backup.filename,'changed');
+   else if(damage==='unsupported-version'){
+    const p=path.join(backup.folder,'manifest.json'),m=JSON.parse(fs.readFileSync(p));m.schemaVersion=10;fs.writeFileSync(p,JSON.stringify(m));
+   }else{
+    const copy=new Database(backup.filename);try{
+     if(damage==='trigger')copy.exec("CREATE TRIGGER evil_migration AFTER UPDATE ON application_metadata BEGIN DELETE FROM users; END;");
+     if(damage==='missing-table')copy.exec('DROP TABLE business_preferences');
+     if(damage==='password')copy.exec("UPDATE users SET password_hash='plaintext'");
+     if(damage==='metadata')copy.exec('UPDATE application_metadata SET schema_version=12');
+     if(damage==='references'){copy.pragma('foreign_keys=OFF');copy.exec("INSERT INTO payments(transaction_id,amount,method) VALUES(999,1,'cash')");}
+    }finally{copy.close();}updateManifest(backup.folder);
+   }
+   const original=fs.readFileSync(backup.filename);assert.throws(()=>h.storage.stageRestore(backup.folder));
+   assert.deepEqual(operationalSnapshot(h.db),before);assert.deepEqual(fs.readFileSync(backup.filename),original);
+   assert.equal(h.storage.history().filter(row=>row.kind==='safety').length,0);
+   assert.equal(fs.existsSync(h.storage.journalPath),false);
+   assert.equal(fs.readdirSync(path.dirname(h.storage.databasePath)).some(name=>name.includes('.restore-stage-')),false);
+  }finally{h.cleanup();}
+ }
+});
+test('failed schema-11 staged migration and changed migrated bytes cannot replace the active database',async()=>{
+ for(const point of ['before-stage-migration','after-stage-migration','changed-stage']){
+  const h=harness();try{
+   populate(h);const backup=await legacyBackup(h),original=fs.readFileSync(backup.filename),before=operationalSnapshot(h.db);
+   if(point==='changed-stage'){
+    const staged=h.storage.stageRestore(backup.folder);fs.appendFileSync(staged.stage,'changed');
+    await assert.rejects(h.storage.restore(staged,{id:1,username:'original-admin'}),/changed/);h.storage.discardStage(staged.stage);
+   }else{h.failAt(point);assert.throws(()=>h.storage.stageRestore(backup.folder),/Injected/);}
+   assert.deepEqual(operationalSnapshot(h.db),before);assert.deepEqual(fs.readFileSync(backup.filename),original);
+   assert.equal(h.storage.history().filter(row=>row.kind==='safety').length,0);
+   assert.equal(fs.readdirSync(path.dirname(h.storage.databasePath)).some(name=>name.includes('.restore-stage-')),false);
+  }finally{h.cleanup();}
+ }
+});
+test('schema-11 restores retain rollback protections at every replacement boundary',async()=>{
+ for(const point of ['after-close','after-old-rename','after-new-rename','before-commit']){
+  const h=harness();try{
+   const backup=await legacyBackup(h);h.db.prepare("UPDATE business_settings SET business_name='Current data'").run();
+   const staged=h.storage.stageRestore(backup.folder);h.failAt(point);
+   await assert.rejects(h.storage.restore(staged,{id:1,username:'original-admin'}),/previous database was recovered/);
+   assert.equal(h.storage.getDatabase().prepare('SELECT business_name FROM business_settings').get().business_name,'Current data');
+   assert.ok(h.storage.history().some(row=>row.kind==='safety'));assert.equal(fs.existsSync(h.storage.journalPath),false);
+  }finally{h.cleanup();}
+ }
+});
+test('startup recovers interrupted legacy restores with an already migrated stage',async()=>{
+ for(const phase of ['prepared','committed']){
+  const h=harness();try{
+   const backup=await legacyBackup(h);h.db.prepare("UPDATE business_settings SET business_name='Current data'").run();
+   const staged=h.storage.stageRestore(backup.folder);h.storage.close();
+   const active=h.storage.databasePath,rollback=active+'.before-restore-legacy.sqlite';fs.renameSync(active,rollback);fs.renameSync(staged.stage,active);
+   fs.writeFileSync(h.storage.journalPath,JSON.stringify({active,rollback,stage:staged.stage,phase,safetyBackup:backup.folder}));
+   const reopened=h.storage.getDatabase();assert.equal(reopened.prepare('SELECT business_name FROM business_settings').get().business_name,phase==='prepared'?'Current data':'Original test bay');
+   assert.equal(reopened.prepare('SELECT schema_version FROM application_metadata').get().schema_version,12);assert.equal(fs.existsSync(h.storage.journalPath),false);
+  }finally{h.cleanup();}
+ }
+});

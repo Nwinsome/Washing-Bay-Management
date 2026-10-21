@@ -26,3 +26,6 @@ user-data/
 desktop-test-results/
 playwright-report/
 *.wbbak/
+
+/release-archive/
+/release-verification/

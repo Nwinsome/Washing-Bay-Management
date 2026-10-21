@@ -1,6 +1,6 @@
 {
   "name": "wash-bay-manager",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Offline washing bay operations, accounts and financial management",
   "main": "main.js",
   "scripts": {

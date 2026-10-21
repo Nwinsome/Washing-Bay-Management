@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('setupApi', {
   complete: (input) => ipcRenderer.invoke('setup:complete', input),
 });
 contextBridge.exposeInMainWorld('appApi', {
+  prepareRecovery: input => ipcRenderer.invoke('recovery:prepare', input),
+  confirmRecovery: input => ipcRenderer.invoke('recovery:confirm', input),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateBusinessSettings: input => ipcRenderer.invoke('settings:business', input),
   updateAdministratorAccount: input => ipcRenderer.invoke('settings:account', input),

@@ -93,6 +93,8 @@ declare global {
       confirmClosing: (input: {businessDate:string;token:string;openingPesewas:number;openingReason:string;carryFrom?:number;actualPesewas:number;explanation:string}) => Promise<{id:number}>;
       reopenClosing: (input: {id:number;reason:string}) => Promise<{success:true}>;
       getSession: () => Promise<Administrator | null>;
+      prepareRecovery: (input: {kind: 'setup'|'replace'|'reset'; password?: string; code?: string; newPassword?: string; confirmPassword?: string}) => Promise<{id:string;code:string}>;
+      confirmRecovery: (input: {id:string;saved:boolean}) => Promise<{username:string}>;
       login: (input: { username: string; password: string }) => Promise<{ ok: true; user: Administrator } | { ok: false; message: string }>;
       logout: () => Promise<{ success: true }>;
       getDashboard: () => Promise<DashboardData>;
